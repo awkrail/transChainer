@@ -4,6 +4,7 @@ from PIL import Image
 import numpy as np
 import chainer
 from chainer import optimizers
+from chainer import Variable
 import chainer.functions as F
 import chainer.links as L
 
@@ -49,7 +50,7 @@ def image_resize(img_file, width):
     return gogh, new_w, new_h
 
 
-def save_image(img, width, new_w, new_h, it):
+def save_image(img, width, new_w, new_h, it, out_dir):
     def to_img(x):
         im = np.zeros((new_h,new_w,3))
         im[:,:,0] = x[2,:,:]
@@ -58,12 +59,9 @@ def save_image(img, width, new_w, new_h, it):
         def clip(a):
             return 0 if a<0 else (255 if a>255 else a)
         im = np.vectorize(clip)(im).astype(np.uint8)
-        Image.fromarray(im).save(args.out_dir+"/im_%05d.png" % it)
+        Image.fromarray(im).save(out_dir+"/im_%05d.png" % it)
 
-    if args.gpu >= 0:
-        img_cpu = add_mean(img.get())
-    else:
-        img_cpu = add_mean(img)
+    img_cpu = add_mean(img)
     if width == new_w:
         to_img(img_cpu[0, :, width-new_h:, :])
     else:
@@ -128,29 +126,31 @@ def main():
     img_style, _, _ = image_resize(args.style_img, W)
 
     # chainer_goghのアルゴリズム
-    mid_org = nn.forward(img_content, volatile=True)
-    style_mats = [get_matrix(y) for y in nn.forward(img_style, volatile=True)]
-    img_gen = np.random.uniform(-20, 20, (1, 3, W, W), dtype=np.float32)
+    mid_org = nn.forward(Variable(img_content, volatile=True))
+    style_mats = [get_matrix(y) for y in nn.forward(Variable(img_style, volatile=True))]
+    img_gen = np.random.uniform(-20, 20, (1, 3, W, W)).astype(np.float32)
     img_gen = chainer.links.Parameter(img_gen)
+    # import ipdb; ipdb.set_trace()
     optimizer = optimizers.Adam(alpha=args.lr)
     optimizer.setup(img_gen)
 
-    for i in range(args.max_iter):
+    for i in range(args.iter):
         img_gen.zerograds()
 
         x = img_gen.W
+
         y = nn.forward(x)
-        L = np.zeros((), dtype=np.float32)
+        L = Variable(np.zeros((), dtype=np.float32))
 
         for l in range(len(y)):
-            ch = y[l].data.shape[0]
-            wd = y[l].data.shape[1]
+            ch = y[l].data.shape[1]
+            wd = y[l].data.shape[2]
             gogh_y = F.reshape(y[l], (ch, wd**2))
             gogh_matrix = F.matmul(gogh_y, gogh_y, transb=True)/np.float32(ch*wd**2)
 
-            L1 = np.float32(args.lam) * np.float32(nn.alpha[l])*F.mean_squared_error(y[l], mid_org[l].data)
-            L2 = np.float32(nn.beta[l]) * F.mean_squared_error(gogh_matrix, style_mats[l].data)/np.float32(len(y))
-            L = L1+L2
+            L1 = np.float32(args.lam) * np.float32(nn.alpha[l])*F.mean_squared_error(y[l], Variable(mid_org[l].data))
+            L2 = np.float32(nn.beta[l]) * F.mean_squared_error(gogh_matrix, Variable(style_mats[l].data))/np.float32(len(y))
+            L += L1+L2
 
             if i%100 == 0:
                 print(i, l, L1.data, L2.data)
@@ -162,10 +162,10 @@ def main():
         tmp_shape = x.data.shape
         def clip(x):
             return -120 if x<-120 else (136 if x>136 else x)
-        img_gen.W.data += np.vectorize(clip)(img_gen.W.data).reshpae(tmp_shape)
+        img_gen.W.data += np.vectorize(clip)(img_gen.W.data).reshape(tmp_shape) - img_gen.W.data
 
         if i%50 == 0:
-            save_image(img_gen.W.data, W, nw, nh, i)
+            save_image(img_gen.W.data, W, nw, nh, i, args.out_dir)
 
 if __name__ == '__main__':
     main()
